@@ -8,6 +8,7 @@ from flask import Response
 import json
 import cloudscraper
 from fake_useragent import UserAgent
+import random
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
@@ -44,85 +45,90 @@ def get_cookies():
     except:
         return ''
 
+# 免费代理列表
+PROXY_LIST = [
+    'socks5://192.252.208.67:14287',
+    'socks5://192.252.211.197:14287',
+    'socks5://192.252.214.20:15864',
+    'socks5://192.252.209.155:14287',
+    'socks5://192.252.208.70:14287'
+]
+
+def get_random_proxy():
+    return random.choice(PROXY_LIST)
+
+def get_video_info(url):
+    try:
+        proxy = get_random_proxy()
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'nocheckcertificate': True,
+            'proxy': proxy,
+            'http_headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Cookie': get_cookies(),
+                'Referer': 'https://www.youtube.com/',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1'
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        # 如果第一个代理失败，尝试其他代理
+        for proxy in PROXY_LIST:
+            try:
+                ydl_opts['proxy'] = proxy
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(url, download=False)
+            except:
+                continue
+        raise e
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
-def get_video_formats(url):
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'nocheckcertificate': True,
-        'ignoreerrors': False,
-        'no_color': True,
-        'extract_flat': False,
-        'http_headers': {
-            'User-Agent': get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-        },
-        # 优化连接设置
-        'socket_timeout': 30,
-        'extractor_retries': 5,
-        'fragment_retries': 10,
-    }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            logger.info(f"Extracting info for URL: {url}")
-            info = ydl.extract_info(url, download=False)
-            formats = []
-            seen_resolutions = set()
-            
-            # 处理所有可用的格式
-            for f in info['formats']:
-                # 记录格式信息用于调试
-                logger.debug(f"Format found: {f.get('format_id')} - {f.get('ext')} - {f.get('vcodec')} - {f.get('acodec')} - {f.get('height')}p")
-                
-                # 检查是否为视频格式
-                if f.get('vcodec') != 'none':
-                    height = f.get('height', 0)
-                    
-                    # 跳过重复的分辨率
-                    if height in seen_resolutions:
-                        continue
-                    
-                    # 查找对应的音频格式
-                    audio_format = None
-                    for af in info['formats']:
-                        if af.get('vcodec') == 'none' and af.get('acodec') != 'none':
-                            audio_format = af['format_id']
-                            break
-                    
-                    if height > 0:  # 确保高度值有效
-                        seen_resolutions.add(height)
-                        format_id = f['format_id']
-                        if audio_format:
-                            format_id = f"{format_id}+{audio_format}"
-                        
-                        formats.append({
-                            'format_id': format_id,
-                            'resolution': f"{height}p",
-                            'filesize': f"{int(f.get('filesize', 0) / 1024 / 1024)} MB" if f.get('filesize') else 'unknown'
-                        })
-            
-            # 按分辨率排序（从高到低）
-            formats.sort(key=lambda x: int(x['resolution'].replace('p', '')), reverse=True)
-            
-            logger.info(f"Found {len(formats)} valid formats")
-            logger.debug(f"Available formats: {formats}")
-            
-            return {
-                'title': info['title'],
-                'thumbnail': info.get('thumbnail', ''),
-                'duration': info.get('duration', 0),
-                'author': info.get('uploader', ''),
-                'formats': formats
-            }
-        except Exception as e:
-            logger.error(f"Error extracting video info: {str(e)}")
-            raise
+@app.route('/get-video-info', methods=['POST'])
+def get_video_formats():
+    try:
+        url = request.json.get('url', '')
+        if not url:
+            return jsonify({'error': '请提供视频URL'}), 400
+
+        info = get_video_info(url)
+        if not info:
+            return jsonify({'error': '无法获取视频信息'}), 400
+
+        formats = []
+        for f in info.get('formats', []):
+            if f.get('format_id') and f.get('ext'):
+                format_info = {
+                    'format_id': f.get('format_id'),
+                    'ext': f.get('ext'),
+                    'format': f.get('format'),
+                    'filesize': f.get('filesize', 0),
+                    'resolution': f.get('resolution', 'N/A')
+                }
+                formats.append(format_info)
+
+        return jsonify({
+            'title': info.get('title', '未知标题'),
+            'thumbnail': info.get('thumbnail', ''),
+            'formats': formats
+        })
+    except Exception as e:
+        return jsonify({'error': f'错误：{str(e)}'}), 400
 
 # 全局变量存储下载进度
 download_progress = {'status': '', 'percent': 0, 'speed': '', 'eta': ''}
@@ -131,62 +137,38 @@ download_progress = {'status': '', 'percent': 0, 'speed': '', 'eta': ''}
 def get_progress():
     return jsonify(download_progress)
 
-@app.route('/get-video-info', methods=['POST'])
-def get_video_info():
-    try:
-        url = request.json.get('url')
-        if not url:
-            return jsonify({'error': 'No URL provided'}), 400
-
-        # 确保URL是完整的YouTube链接
-        if 'youtu.be' in url:
-            video_id = url.split('/')[-1].split('?')[0]
-            url = f'https://www.youtube.com/watch?v={video_id}'
-
-        logger.info(f"Fetching video info for URL: {url}")
-        video_info = get_video_formats(url)
-        logger.info("Video info prepared successfully")
-        return jsonify(video_info)
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error in get_video_info: {error_msg}", exc_info=True)
-        return jsonify({'error': f"Error: {error_msg}"}), 400
-
 @app.route('/download', methods=['POST'])
 def download_video():
     try:
-        url = request.json.get('url')
-        format_id = request.json.get('itag')
-        
-        if not url or not format_id:
-            return jsonify({'error': 'Missing URL or format ID'}), 400
+        url = request.json.get('url', '')
+        video_format = request.json.get('format', 'best')
+        if not url:
+            return jsonify({'error': '请提供视频URL'}), 400
 
-        logger.info(f"Starting download process for URL: {url}")
-        logger.info(f"Selected format ID: {format_id}")
-
-        # 确保URL是完整的YouTube链接
-        if 'youtu.be' in url:
-            video_id = url.split('/')[-1].split('?')[0]
-            url = f'https://www.youtube.com/watch?v={video_id}'
-            logger.info(f"Converted to full URL: {url}")
-
-        # 获取视频信息
-        logger.info("Fetching video information...")
-        info = get_video_formats(url)
-        filename = clean_filename(f"{info['title']}.mp4")
-        filepath = os.path.join(DOWNLOAD_FOLDER, filename)
-        logger.info(f"Video will be saved as: {filepath}")
-        
-        # 确保下载目录存在
-        os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
-        
-        # 获取ffmpeg路径
-        ffmpeg_location = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffmpeg.exe')
-        if not os.path.exists(ffmpeg_location):
-            logger.error(f"FFmpeg not found at: {ffmpeg_location}")
-            return jsonify({'error': 'FFmpeg not found. Please make sure ffmpeg.exe is in the project directory.'}), 400
-        else:
-            logger.info(f"Found FFmpeg at: {ffmpeg_location}")
+        proxy = get_random_proxy()
+        ydl_opts = {
+            'format': video_format,
+            'outtmpl': os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'),
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'proxy': proxy,
+            'progress_hooks': [my_hook],
+            'http_headers': {
+                'User-Agent': get_random_user_agent(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Cookie': get_cookies(),
+                'Referer': 'https://www.youtube.com/',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'same-origin',
+                'Sec-Fetch-User': '?1',
+                'Upgrade-Insecure-Requests': '1'
+            }
+        }
         
         def my_hook(d):
             global download_progress
@@ -215,54 +197,6 @@ def download_video():
                 })
                 logger.error(f"Error during download: {d.get('error')}")
 
-        ydl_opts = {
-            'format': format_id,
-            'outtmpl': filepath,
-            'quiet': False,
-            'no_warnings': False,
-            'nocheckcertificate': True,
-            'ignoreerrors': False,
-            'no_color': True,
-            'ffmpeg_location': ffmpeg_location,
-            'progress_hooks': [my_hook],
-            'http_headers': {
-                'User-Agent': get_random_user_agent(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Cookie': get_cookies(),
-                'Referer': 'https://www.youtube.com/',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'same-origin',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
-            },
-            # 进一步优化下载速度的设置
-            'buffersize': 1024 * 1024 * 32,  # 增加到32MB buffer
-            'concurrent_fragments': 8,        # 增加到8个并发下载片段
-            'file_access_retries': 10,       # 增加文件访问重试次数
-            'fragment_retries': 15,          # 增加片段下载重试次数
-            'retry_sleep': 2,                # 减少重试间隔
-            'socket_timeout': 60,            # 增加Socket超时时间
-            'extractor_retries': 10,         # 增加提取器重试次数
-            'external_downloader_args': [
-                '-c',                        # 支持断点续传
-                '--max-connection-per-server', '32',  # 增加到32个连接
-                '--min-split-size', '512K',  # 减小分片大小以增加并发
-                '--max-concurrent-downloads', '8',  # 最大并发下载数
-                '--max-download-limit', '0',  # 不限制下载速度
-                '--auto-file-renaming', 'true',  # 自动重命名文件
-                '--check-certificate', 'false',  # 禁用证书检查
-                '--timeout', '60',  # 连接超时时间
-                '--max-tries', '10',  # 最大重试次数
-            ],
-            'http_chunk_size': 1024 * 1024 * 10,  # 10MB的块大小
-            'ratelimit': None,  # 禁用速度限制
-            'throttledratelimit': None,  # 禁用节流
-        }
-        
         try:
             # 重置下载进度
             download_progress.update({
@@ -277,17 +211,17 @@ def download_video():
                 ydl.download([url])
                 logger.info("Download completed successfully")
             
-            if os.path.exists(filepath):
-                file_size = os.path.getsize(filepath)
+            if os.path.exists(os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s')):
+                file_size = os.path.getsize(os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'))
                 logger.info(f"File successfully created. Size: {file_size} bytes")
                 return jsonify({
                     'success': True,
-                    'filename': filename,
-                    'download_path': filepath,
+                    'filename': '%(title)s.%(ext)s',
+                    'download_path': os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s'),
                     'file_size': file_size
                 })
             else:
-                logger.error(f"File not found after download: {filepath}")
+                logger.error(f"File not found after download: {os.path.join(DOWNLOAD_FOLDER, '%(title)s.%(ext)s')}")
                 return jsonify({'error': 'File not found after download'}), 400
                 
         except Exception as e:
